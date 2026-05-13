@@ -1,19 +1,17 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
 import httpx
-import asyncio
 import os
 import re
 
 app = FastAPI(title="SaveIt Pro API", version="1.0.0")
 
-# ✅ CORS — frontend se connect hone ke liye
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Production mein apna domain dalo
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,6 +27,47 @@ class InfoRequest(BaseModel):
 # ──────────────────────────────────────────────
 # HELPERS
 # ──────────────────────────────────────────────
+
+COOKIES_FILE = "cookies.txt"
+
+def get_base_opts() -> dict:
+    """
+    Common yt-dlp options — YouTube 403 bypass ke liye
+    """
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+
+        # ✅ YouTube bot detection bypass — android client use karo
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
+
+        # ✅ Real browser jaisa User-Agent
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+
+        # ✅ Retries — network issues ke liye
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
+    }
+
+    # ✅ cookies.txt available hai toh use karo
+    if os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+
+    return opts
+
 
 def detect_platform(url: str) -> str:
     url = url.lower()
@@ -46,6 +85,7 @@ def detect_platform(url: str) -> str:
         return "tiktok"
     return "other"
 
+
 def format_size(bytes_val) -> str:
     if not bytes_val:
         return "Unknown"
@@ -53,6 +93,7 @@ def format_size(bytes_val) -> str:
     if mb >= 1000:
         return f"{mb/1024:.1f} GB"
     return f"{mb:.1f} MB"
+
 
 def format_duration(seconds) -> str:
     if not seconds:
@@ -62,6 +103,7 @@ def format_duration(seconds) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
 
 def format_views(views) -> str:
     if not views:
@@ -78,7 +120,12 @@ def format_views(views) -> str:
 
 @app.get("/")
 def root():
-    return {"status": "SaveIt Pro API chal raha hai ✅", "version": "1.0.0"}
+    cookies_status = "✅ Loaded" if os.path.exists(COOKIES_FILE) else "❌ Not found"
+    return {
+        "status": "SaveIt Pro API chal raha hai ✅",
+        "version": "1.0.0",
+        "cookies": cookies_status,
+    }
 
 @app.get("/health")
 def health():
@@ -87,10 +134,6 @@ def health():
 
 @app.post("/api/info")
 async def get_video_info(req: InfoRequest):
-    """
-    URL se video info fetch karo:
-    title, thumbnail, duration, available qualities
-    """
     url = req.url.strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL nahi diya")
@@ -98,10 +141,8 @@ async def get_video_info(req: InfoRequest):
     platform = detect_platform(url)
 
     ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
+        **get_base_opts(),
         "skip_download": True,
-        "noplaylist": True,
     }
 
     try:
@@ -112,12 +153,10 @@ async def get_video_info(req: InfoRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)[:200]}")
 
-    # Available video qualities
     formats = info.get("formats", [])
     qualities = []
     seen_res = set()
 
-    # Video formats
     for f in reversed(formats):
         height = f.get("height")
         ext = f.get("ext", "mp4")
@@ -140,10 +179,8 @@ async def get_video_info(req: InfoRequest):
                 "has_audio": acodec != "none",
             })
 
-    # Sort by quality (high to low)
     qualities.sort(key=lambda x: x["height"], reverse=True)
 
-    # MP3 / Audio option hamesha add karo
     qualities.append({
         "format_id": "bestaudio",
         "resolution": "MP3",
@@ -165,20 +202,17 @@ async def get_video_info(req: InfoRequest):
         "views": format_views(info.get("view_count")),
         "description": (info.get("description", "") or "")[:300],
         "upload_date": info.get("upload_date", ""),
-        "qualities": qualities[:8],  # Max 8 options
+        "qualities": qualities[:8],
         "original_url": url,
     }
 
 
 @app.get("/api/download")
 async def download_video(
-    url: str = Query(..., description="Video URL"),
-    format_id: str = Query("bestvideo+bestaudio", description="Format ID from /api/info"),
-    quality: str = Query("720p", description="Quality label for filename"),
+    url: str = Query(...),
+    format_id: str = Query("bestvideo+bestaudio"),
+    quality: str = Query("720p"),
 ):
-    """
-    Video stream karke download karo
-    """
     if not url:
         raise HTTPException(status_code=400, detail="URL required hai")
 
@@ -186,9 +220,8 @@ async def download_video(
 
     if is_audio:
         ydl_opts = {
+            **get_base_opts(),
             "format": "bestaudio/best",
-            "quiet": True,
-            "no_warnings": True,
             "outtmpl": "/tmp/%(title)s.%(ext)s",
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
@@ -199,29 +232,26 @@ async def download_video(
         content_type = "audio/mpeg"
         ext = "mp3"
     else:
+        height = quality.replace("p", "").replace(" HD", "")
         ydl_opts = {
-            "format": f"{format_id}+bestaudio/best[height<={quality.replace('p','').replace(' HD','')}]/best",
-            "quiet": True,
-            "no_warnings": True,
+            **get_base_opts(),
+            "format": f"{format_id}+bestaudio/best[height<={height}]/best",
             "outtmpl": "/tmp/%(title)s.%(ext)s",
             "merge_output_format": "mp4",
         }
         content_type = "video/mp4"
         ext = "mp4"
 
-    # Download to temp
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-            # Audio ka extension change hota hai
             if is_audio:
                 filename = filename.rsplit(".", 1)[0] + ".mp3"
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Download fail: {str(e)[:200]}")
 
     if not os.path.exists(filename):
-        # Possible filename mismatch — search karo
         base = filename.rsplit(".", 1)[0]
         for possible_ext in ["mp4", "mp3", "webm", "mkv", "m4a"]:
             candidate = f"{base}.{possible_ext}"
@@ -237,9 +267,8 @@ async def download_video(
 
     def file_stream():
         with open(filename, "rb") as f:
-            while chunk := f.read(1024 * 256):  # 256KB chunks
+            while chunk := f.read(1024 * 256):
                 yield chunk
-        # Cleanup
         try:
             os.remove(filename)
         except Exception:
@@ -258,9 +287,6 @@ async def download_video(
 
 @app.get("/api/thumbnail")
 async def proxy_thumbnail(url: str = Query(...)):
-    """
-    Thumbnail image proxy — CORS issue fix karta hai
-    """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url)
