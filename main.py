@@ -17,37 +17,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ──────────────────────────────────────────────
-# CONFIG
-# ──────────────────────────────────────────────
-
-# Railway → Variables mein RAPIDAPI_KEY set karo
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
 COOKIES_FILE = "cookies.txt"
 
-# ──────────────────────────────────────────────
-# MODELS
-# ──────────────────────────────────────────────
 
 class InfoRequest(BaseModel):
     url: str
 
-# ──────────────────────────────────────────────
-# HELPERS
-# ──────────────────────────────────────────────
 
 def is_youtube(url: str) -> bool:
     return "youtube.com" in url or "youtu.be" in url
 
+
 def detect_platform(url: str) -> str:
     url = url.lower()
-    if "youtube.com" in url or "youtu.be" in url:  return "youtube"
-    elif "instagram.com" in url:                    return "instagram"
-    elif "pinterest.com" in url or "pin.it" in url: return "pinterest"
-    elif "facebook.com" in url or "fb.watch" in url:return "facebook"
-    elif "twitter.com" in url or "x.com" in url:   return "twitter"
-    elif "tiktok.com" in url:                       return "tiktok"
+    if "youtube.com" in url or "youtu.be" in url:   return "youtube"
+    elif "instagram.com" in url:                     return "instagram"
+    elif "pinterest.com" in url or "pin.it" in url:  return "pinterest"
+    elif "facebook.com" in url or "fb.watch" in url: return "facebook"
+    elif "twitter.com" in url or "x.com" in url:    return "twitter"
+    elif "tiktok.com" in url:                        return "tiktok"
     return "other"
+
 
 def extract_youtube_id(url: str) -> str:
     patterns = [
@@ -61,11 +52,13 @@ def extract_youtube_id(url: str) -> str:
             return m.group(1)
     return ""
 
+
 def format_size(bytes_val) -> str:
     if not bytes_val:
         return "Unknown"
     mb = bytes_val / (1024 * 1024)
     return f"{mb/1024:.1f} GB" if mb >= 1000 else f"{mb:.1f} MB"
+
 
 def format_duration(seconds) -> str:
     if not seconds:
@@ -74,14 +67,15 @@ def format_duration(seconds) -> str:
     hours, minutes = divmod(minutes, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
+
 def format_views(views) -> str:
     if not views: return "—"
     if views >= 1_000_000: return f"{views/1_000_000:.1f}M"
     if views >= 1_000:     return f"{views/1_000:.1f}K"
     return str(views)
 
-def get_ ytdlp_opts() -> dict:
-    """yt-dlp opts — Instagram/Facebook/Pinterest ke liye"""
+
+def get_ytdlp_opts() -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -99,12 +93,8 @@ def get_ ytdlp_opts() -> dict:
         opts["cookiefile"] = COOKIES_FILE
     return opts
 
-# ──────────────────────────────────────────────
-# YOUTUBE via RapidAPI
-# ──────────────────────────────────────────────
 
 async def youtube_info_rapidapi(video_id: str) -> dict:
-    """YouTube video info RapidAPI se fetch karo"""
     url = f"https://youtube-mp36.p.rapidapi.com/dl?id={video_id}"
     headers = {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
@@ -112,23 +102,8 @@ async def youtube_info_rapidapi(video_id: str) -> dict:
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers=headers)
-        data = resp.json()
-    return data
+        return resp.json()
 
-
-async def youtube_info_ytdlp(url: str) -> dict:
-    """Fallback: yt-dlp se YouTube info (local testing ke liye)"""
-    opts = {
-        **get_ytdlp_opts(),
-        "skip_download": True,
-        "extractor_args": {"youtube": {"player_client": ["android_embedded"]}},
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
-
-# ──────────────────────────────────────────────
-# ROUTES
-# ──────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -138,6 +113,7 @@ def root():
         "rapidapi": "✅ Key set" if RAPIDAPI_KEY else "❌ Key missing",
         "cookies": "✅ Loaded" if os.path.exists(COOKIES_FILE) else "❌ Not found",
     }
+
 
 @app.get("/health")
 def health():
@@ -152,7 +128,7 @@ async def get_video_info(req: InfoRequest):
 
     platform = detect_platform(url)
 
-    # ── YOUTUBE — RapidAPI use karo ──
+    # ── YOUTUBE — RapidAPI ──
     if is_youtube(url) and RAPIDAPI_KEY:
         video_id = extract_youtube_id(url)
         if not video_id:
@@ -164,21 +140,22 @@ async def get_video_info(req: InfoRequest):
             raise HTTPException(status_code=500, detail=f"RapidAPI error: {str(e)[:150]}")
 
         if data.get("status") != "ok":
-            raise HTTPException(status_code=422, detail=f"YouTube fetch fail: {data.get('msg','Unknown error')}")
+            raise HTTPException(status_code=422, detail=f"YouTube fetch fail: {data.get('msg', 'Unknown error')}")
 
-        # RapidAPI se MP3 link milta hai
+        filesize = data.get("filesize", 0)
+        size_str = f"{filesize // (1024*1024)} MB" if filesize else "~5-10 MB"
+
         qualities = [
             {
                 "format_id": "rapidapi_mp3",
                 "resolution": "MP3",
                 "height": 0,
                 "ext": "mp3",
-                "size": f"{data.get('filesize', 0) // (1024*1024)} MB" if data.get("filesize") else "~5-10 MB",
+                "size": size_str,
                 "type": "audio",
                 "has_audio": True,
-                "download_url": data.get("link", ""),  # Direct download link
+                "download_url": data.get("link", ""),
             },
-            # Video ke liye 360p option
             {
                 "format_id": "rapidapi_360p",
                 "resolution": "360p",
@@ -207,7 +184,7 @@ async def get_video_info(req: InfoRequest):
             "video_id": video_id,
         }
 
-    # ── OTHER PLATFORMS — yt-dlp use karo ──
+    # ── OTHER PLATFORMS — yt-dlp ──
     opts = {**get_ytdlp_opts(), "skip_download": True}
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -275,12 +252,13 @@ async def download_video(
     url: str = Query(...),
     format_id: str = Query("bestvideo+bestaudio"),
     quality: str = Query("720p"),
-    direct_url: str = Query("", description="RapidAPI se mila direct link"),
 ):
     if not url:
         raise HTTPException(status_code=400, detail="URL required hai")
 
-    # ── YOUTUBE MP3 — RapidAPI direct link use karo ──
+    is_audio = format_id == "bestaudio" or quality == "MP3"
+
+    # ── YOUTUBE MP3 via RapidAPI ──
     if is_youtube(url) and RAPIDAPI_KEY and format_id == "rapidapi_mp3":
         video_id = extract_youtube_id(url)
         if not video_id:
@@ -295,7 +273,6 @@ async def download_video(
         if not dl_link:
             raise HTTPException(status_code=500, detail="Download link nahi mila")
 
-        # RapidAPI link se stream karo
         async def rapidapi_stream():
             async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
                 async with client.stream("GET", dl_link) as resp:
@@ -308,12 +285,10 @@ async def download_video(
         return StreamingResponse(
             rapidapi_stream(),
             media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": f'attachment; filename="{safe_title}.mp3"',
-            }
+            headers={"Content-Disposition": f'attachment; filename="{safe_title}.mp3"'}
         )
 
-    # ── YOUTUBE 360p VIDEO — yt-dlp android client ──
+    # ── YOUTUBE 360p VIDEO ──
     if is_youtube(url) and format_id == "rapidapi_360p":
         opts = {
             **get_ytdlp_opts(),
@@ -332,6 +307,7 @@ async def download_video(
             raise HTTPException(status_code=500, detail="File nahi mila")
 
         safe_title = re.sub(r'[^\w\s-]', '', info.get("title", "video"))[:60].strip()
+        file_size = os.path.getsize(filename)
 
         def stream():
             with open(filename, "rb") as f:
@@ -345,13 +321,11 @@ async def download_video(
             media_type="video/mp4",
             headers={
                 "Content-Disposition": f'attachment; filename="{safe_title}.mp4"',
-                "Content-Length": str(os.path.getsize(filename)),
+                "Content-Length": str(file_size),
             }
         )
 
     # ── OTHER PLATFORMS — yt-dlp ──
-    is_audio = format_id == "bestaudio" or quality == "MP3"
-
     if is_audio:
         opts = {
             **get_ytdlp_opts(),
